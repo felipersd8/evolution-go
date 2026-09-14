@@ -362,17 +362,58 @@ func sharedContainer(w whatsmeowService) (*sqlstore.Container, error) {
 	return container, nil
 }
 
+// ============================================================================
+// One client per instance — the rest of the file assumes it, and two
+// `/instance/connect` calls in the same second used to create two: the
+// clientPointer is only assigned after a slow stretch (device store, web
+// version lookup), so both calls passed the "already running?" check. The
+// second client was left orphaned but alive, still producing QR codes;
+// `/instance/status` read the other one; and when one of them hit the QR
+// timeout its forced logout tore down the session the user had just paired.
+//
+// `starting` marks an instance whose StartClient is between the check and
+// the event loop. Released before the loop (so the kill → restart path,
+// which re-enters StartClient from inside the loop, is not blocked) and on
+// every early return.
+// ============================================================================
+
+var (
+	startingMu sync.Mutex
+	starting   = map[string]bool{}
+)
+
+// beginStart reserves the right to start the instance's client. False when
+// one is already connected or another StartClient is mid-setup.
+func (w whatsmeowService) beginStart(id string) bool {
+	startingMu.Lock()
+	defer startingMu.Unlock()
+	if starting[id] {
+		return false
+	}
+	if c := w.clientPointer[id]; c != nil && c.IsConnected() {
+		return false
+	}
+	starting[id] = true
+	return true
+}
+
+func endStart(id string) {
+	startingMu.Lock()
+	delete(starting, id)
+	startingMu.Unlock()
+}
+
 func (w whatsmeowService) StartClient(cd *ClientData) {
 
 	w.loggerWrapper.GetLogger(cd.Instance.Id).LogInfo("Starting websocket connection to Whatsapp for user '%s'", cd.Instance.Id)
 
 	var deviceStore *store.Device
 
-	if w.clientPointer[cd.Instance.Id] != nil {
-		if w.clientPointer[cd.Instance.Id].IsConnected() {
-			return
-		}
+	if !w.beginStart(cd.Instance.Id) {
+		w.loggerWrapper.GetLogger(cd.Instance.Id).LogWarn("[%s] Client already running or starting; ignoring duplicate start", cd.Instance.Id)
+		return
 	}
+	defer endStart(cd.Instance.Id)
 
 	// The container is created once and shared — see sharedContainer below.
 	container, err := sharedContainer(w)
@@ -614,6 +655,11 @@ func (w whatsmeowService) StartClient(cd *ClientData) {
 	}
 
 	// Removed auto-reconnect logic to prevent infinite loops
+
+	// Setup is over: the pointer is set and the socket is up. Release the
+	// start reservation here, not only in the defer — the kill branch below
+	// re-enters StartClient from inside this loop.
+	endStart(cd.Instance.Id)
 
 	for {
 		select {
