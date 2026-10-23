@@ -478,6 +478,13 @@ func (m *messageService) DeleteMessageEveryone(data *MessageStruct, instance *in
 		return "", "", errors.New("invalid phone number")
 	}
 
+	// Strip the "+" that ParseJID/CreateJID adds. The recipient goes both into
+	// the usync/device resolution of SendMessage and into the revoke's
+	// MessageKey. With "+5548…@s.whatsapp.net" the usync query is never
+	// answered ("info query timed out" after 75 s) and the revoke never leaves.
+	// See utils.CanonicalJID.
+	recipient = utils.CanonicalJID(recipient)
+
 	m.loggerWrapper.GetLogger(instance.Id).LogInfo("Revoking message %s from %s", data.MessageID, recipient)
 
 	resp, err := client.SendMessage(
@@ -506,6 +513,10 @@ func (m *messageService) EditMessage(data *EditMessageStruct, instance *instance
 		return "", "", errors.New("invalid phone number")
 	}
 
+	// Same as DeleteMessageEveryone: a "+JID" breaks the usync lookup and the
+	// edit's MessageKey. See utils.CanonicalJID.
+	recipient = utils.CanonicalJID(recipient)
+
 	resp, err := client.SendMessage(
 		context.Background(),
 		recipient,
@@ -518,7 +529,7 @@ func (m *messageService) EditMessage(data *EditMessageStruct, instance *instance
 				},
 			}))
 	if err != nil {
-		m.loggerWrapper.GetLogger(instance.Id).LogError("[%s] error revoking message: %v", instance.Id, err)
+		m.loggerWrapper.GetLogger(instance.Id).LogError("[%s] error editing message: %v", instance.Id, err)
 		return "", "", err
 	}
 
