@@ -464,6 +464,22 @@ func (m *messageService) GetMessageStatus(data *MessageStatusStruct, instance *i
 	return result, ts.String(), nil
 }
 
+// chatAsSent resolves a phone JID to the JID the send path would have used
+// for it (the LID, usually), so the edit or the revoke lands in the same chat
+// as the message it refers to. See utils.ResolveUserJID.
+func (m *messageService) chatAsSent(client *whatsmeow.Client, chat types.JID, instanceId string) types.JID {
+	log := m.loggerWrapper.GetLogger(instanceId)
+	resolved := utils.ResolveUserJID(chat, func(phones []string) ([]types.IsOnWhatsAppResponse, error) {
+		return client.IsOnWhatsApp(context.Background(), phones)
+	}, func(format string, args ...any) {
+		log.LogWarn("["+instanceId+"] "+format, args...)
+	})
+	if resolved != chat {
+		log.LogInfo("[%s] Chat %s resolved to %s, as the send path does", instanceId, chat, resolved)
+	}
+	return resolved
+}
+
 func (m *messageService) DeleteMessageEveryone(data *MessageStruct, instance *instance_model.Instance) (string, string, error) {
 	client, err := m.ensureClientConnected(instance.Id)
 	if err != nil {
@@ -483,7 +499,7 @@ func (m *messageService) DeleteMessageEveryone(data *MessageStruct, instance *in
 	// MessageKey. With "+5548…@s.whatsapp.net" the usync query is never
 	// answered ("info query timed out" after 75 s) and the revoke never leaves.
 	// See utils.CanonicalJID.
-	recipient = utils.CanonicalJID(recipient)
+	recipient = m.chatAsSent(client, utils.CanonicalJID(recipient), instance.Id)
 
 	m.loggerWrapper.GetLogger(instance.Id).LogInfo("Revoking message %s from %s", data.MessageID, recipient)
 
@@ -515,7 +531,7 @@ func (m *messageService) EditMessage(data *EditMessageStruct, instance *instance
 
 	// Same as DeleteMessageEveryone: a "+JID" breaks the usync lookup and the
 	// edit's MessageKey. See utils.CanonicalJID.
-	recipient = utils.CanonicalJID(recipient)
+	recipient = m.chatAsSent(client, utils.CanonicalJID(recipient), instance.Id)
 
 	resp, err := client.SendMessage(
 		context.Background(),
